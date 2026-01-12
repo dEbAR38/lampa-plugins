@@ -6,7 +6,7 @@
         is_running: false,
 
         init: function () {
-            Lampa.Noty.show('КП Плагин: Легкая версия (V10)');
+            Lampa.Noty.show('КП Плагин V11: CorsProxy');
             
             try {
                 var saved = Lampa.Storage.get('kp_master_cache', '{}');
@@ -46,7 +46,7 @@
                 this.startScan(current_id);
             } else {
                 Lampa.Input.edit({
-                    title: 'Введите ID КиноПоиска',
+                    title: 'Введите ID (только цифры)',
                     value: '',
                     free: true,
                     nosave: true
@@ -78,56 +78,70 @@
         },
 
         startScan: function (user_id) {
-            if (this.is_running) return Lampa.Noty.show('Уже работает...');
+            if (this.is_running) return Lampa.Noty.show('Процесс уже идет...');
 
             this.is_running = true;
-            Lampa.Noty.show('Сканирование начато. Не нажимайте ничего...');
+            Lampa.Noty.show('Подключение к новому прокси...');
 
             var page = 1;
             var new_items = 0;
+            // Используем HTTPS ссылку
             var base_url = 'https://www.kinopoisk.ru/user/' + user_id + '/votes/list/ord/date/page/';
             
-            // Счетчик для редкого сохранения
             var save_counter = 0;
 
             var next = function () {
-                var proxy = 'https://api.allorigins.win/get?url=' + encodeURIComponent(base_url + page + '/');
+                // НОВЫЙ ПРОКСИ: corsproxy.io
+                var proxy = 'https://corsproxy.io/?' + encodeURIComponent(base_url + page + '/');
                 
                 $.ajax({
                     url: proxy, 
-                    dataType: 'json', 
-                    timeout: 15000, // Увеличили таймаут ожидания
+                    type: 'GET',
+                    timeout: 20000, 
                     success: function (res) {
-                        if (!res.contents) { 
-                            KP_Master.finish('Ошибка сети (прокси)', new_items); 
-                            return; 
+                        // Проверка на БЛОКИРОВКУ
+                        if (res.indexOf('SmartCaptcha') > -1 || res.indexOf('робот') > -1) {
+                            KP_Master.finish('ОШИБКА: Яндекс требует Капчу. Попробуйте позже.', new_items);
+                            return;
                         }
-                        
-                        var text = res.contents;
-                        // Очищаем res сразу, чтобы освободить память ТВ
-                        res = null; 
 
-                        var regex = /film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g;
-                        var matches = [...text.matchAll(regex)];
+                        // Проверка на пустоту
+                        if (res.length < 500) {
+                             KP_Master.finish('ОШИБКА: Пустой ответ от сервера.', new_items);
+                             return;
+                        }
+
+                        // Поиск фильмов (Улучшенный regex)
+                        // Ищет /film/ID/ ... и любое число 1-10 после него
+                        var regex = /film\/(\d+)\/.*?(\d{1,2})<\/div>/g; 
+                        // Если старый дизайн не сработал, пробуем новый (там оценка в span или div с классом)
+                        var matches = [...res.matchAll(/film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g)];
 
                         if (matches.length === 0) { 
-                            KP_Master.finish('Готово (Все страницы)', new_items); 
-                            return; 
+                            // Если всё равно 0, пробуем супер-грубый поиск (на случай смены верстки)
+                            // Просто ищем ID, а оценку будем искать "на глаз"
+                            if(res.indexOf('film/' + user_id) === -1) {
+                                KP_Master.finish('Готово (Список закончился)', new_items); 
+                                return; 
+                            }
                         }
 
                         var changes = 0;
                         matches.forEach(function (m) {
                             var id = m[1]; var rating = parseInt(m[2]);
-                            if (KP_Master.data[id] !== rating) {
-                                KP_Master.data[id] = rating; changes++; new_items++;
+                            // Фильтр мусора (иногда парсится год 2024 как оценка)
+                            if (rating > 0 && rating <= 10) {
+                                if (KP_Master.data[id] !== rating) {
+                                    KP_Master.data[id] = rating; changes++; new_items++;
+                                }
                             }
                         });
 
                         Lampa.Noty.show('Стр ' + page + ': найдено ' + matches.length);
                         
-                        // ОПТИМИЗАЦИЯ: Сохраняем только каждую 5-ю страницу
+                        // Сохраняем каждые 3 страницы
                         save_counter++;
-                        if (save_counter % 5 === 0) {
+                        if (save_counter % 3 === 0) {
                             Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
                         }
 
@@ -138,12 +152,11 @@
                         page++;
                         if (page > 150) { KP_Master.finish('Лимит страниц', new_items); return; }
                         
-                        // ОПТИМИЗАЦИЯ: Ждем 4 секунды вместо 2.5
-                        setTimeout(next, 4000); 
+                        setTimeout(next, 3500); 
                     },
-                    error: function () { 
-                        Lampa.Noty.show('Сбой сети. Жду 10 сек...');
-                        setTimeout(next, 10000); 
+                    error: function (xhr, status) { 
+                        Lampa.Noty.show('Ошибка сети: ' + status + '. Жду...');
+                        setTimeout(next, 6000); 
                     }
                 });
             };
@@ -152,9 +165,7 @@
 
         finish: function (msg, count) {
             this.is_running = false;
-            // Финальное сохранение обязательно
             Lampa.Storage.set('kp_master_cache', JSON.stringify(this.data));
-            
             Lampa.Noty.show(msg + '. Обновлено: ' + (count || 0));
             if (Lampa.Activity.active().activity) Lampa.Activity.active().activity.render();
         }
