@@ -11,10 +11,9 @@
         },
 
         init: function () {
-            // Уведомление о старте
-            Lampa.Noty.show('Плагин КП: Загружен');
+            Lampa.Noty.show('КП Плагин: Настройки в разделе "Остальное"');
 
-            // 1. Читаем настройки
+            // Загрузка кэша
             try {
                 var saved = Lampa.Storage.get('kp_master_cache', '{}');
                 this.data = JSON.parse(saved);
@@ -22,9 +21,12 @@
 
             this.params.user_id = Lampa.Storage.get('kp_user_id', '');
 
-            // 2. ВСТРАИВАЕМ НАСТРОЙКИ В РАЗДЕЛ "ИНТЕРФЕЙС"
+            // --- НАСТРОЙКИ ---
+            // 'more' — это внутреннее имя раздела "Остальное"
+            // Это самое безопасное место, оно никогда не вызывает сбоев.
+            
             Lampa.SettingsApi.addParam({
-                component: 'interface', // <--- Теперь это в Интерфейсе
+                component: 'more', 
                 param: {
                     name: 'kp_user_id',
                     type: 'input',
@@ -33,7 +35,7 @@
                 },
                 field: {
                     name: 'КиноПоиск ID',
-                    description: 'Цифры из ссылки на профиль для синхронизации'
+                    description: 'Цифры из ссылки на ваш профиль'
                 },
                 onChange: function (v) {
                     KP_Master.params.user_id = v;
@@ -41,7 +43,7 @@
             });
 
             Lampa.SettingsApi.addParam({
-                component: 'interface', // <--- И это тоже
+                component: 'more',
                 param: {
                     name: 'kp_force_full',
                     type: 'trigger',
@@ -49,17 +51,15 @@
                 },
                 field: {
                     name: 'КП: Полная проверка',
-                    description: 'Сканировать все оценки заново (если меняли старые)'
+                    description: 'Перекачать все оценки (если меняли старые)'
                 },
                 onChange: function (v) {
                     KP_Master.params.force_full = v;
                 }
             });
 
-            // 3. Добавляем кнопку в боковое меню
+            // Кнопка в меню и отрисовка
             this.addMenu();
-
-            // 4. Включаем отрисовку оценок
             this.addRenderHook();
         },
 
@@ -105,10 +105,8 @@
         },
 
         startScan: function () {
-            // Актуализируем ID перед стартом
             this.params.user_id = Lampa.Storage.get('kp_user_id', '');
-            
-            if (!this.params.user_id) return Lampa.Noty.show('Сначала введите ID в Настройки -> Интерфейс');
+            if (!this.params.user_id) return Lampa.Noty.show('Сначала введите ID в Настройки -> Остальное');
             if (this.is_running) return Lampa.Noty.show('Синхронизация уже идет...');
 
             this.is_running = true;
@@ -117,7 +115,6 @@
 
             var page = 1;
             var new_items = 0;
-            // Важно: ord/date сортирует от новых к старым
             var base_url = 'https://www.kinopoisk.ru/user/' + this.params.user_id + '/votes/list/ord/date/page/';
 
             var next = function () {
@@ -127,36 +124,28 @@
                     success: function (res) {
                         if (!res.contents) { KP_Master.finish('Ошибка доступа (Proxy)'); return; }
                         
-                        var text = res.contents;
-                        // Регулярка для поиска
                         var regex = /film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g;
-                        var matches = [...text.matchAll(regex)];
+                        var matches = [...res.contents.matchAll(regex)];
 
-                        if (matches.length === 0) { KP_Master.finish('Готово (Конец)', new_items); return; }
+                        if (matches.length === 0) { KP_Master.finish('Готово', new_items); return; }
 
                         var changes = 0;
                         matches.forEach(function (m) {
-                            var id = m[1];
-                            var rating = parseInt(m[2]);
+                            var id = m[1]; var rating = parseInt(m[2]);
                             if (KP_Master.data[id] !== rating) {
-                                KP_Master.data[id] = rating;
-                                changes++; new_items++;
+                                KP_Master.data[id] = rating; changes++; new_items++;
                             }
                         });
 
-                        Lampa.Noty.show('Стр ' + page + ': ' + matches.length + ' шт. (Новых: ' + changes + ')');
+                        Lampa.Noty.show('Стр ' + page + ': ' + matches.length + ' (Новых: ' + changes + ')');
                         Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
 
-                        // Если ничего нового на странице и не стоит галочка "Полная проверка" — стоп
                         if (changes === 0 && !KP_Master.params.force_full && page > 1) { 
-                            KP_Master.finish('Синхронизировано', new_items); 
-                            return; 
+                            KP_Master.finish('Синхронизировано', new_items); return; 
                         }
-                        
                         page++;
-                        if (page > 150) { KP_Master.finish('Лимит страниц (2000+ фильмов)', new_items); return; }
-                        
-                        setTimeout(next, 2500); // 2.5 сек пауза
+                        if (page > 150) { KP_Master.finish('Лимит страниц', new_items); return; }
+                        setTimeout(next, 2500);
                     },
                     error: function () { setTimeout(next, 5000); }
                 });
@@ -178,10 +167,6 @@
     }
 
     if (window.appready) startPlugin();
-    else {
-        Lampa.Listener.follow('app', function (e) {
-            if (e.type == 'ready') startPlugin();
-        });
-    }
+    else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') startPlugin(); });
 
 })();
