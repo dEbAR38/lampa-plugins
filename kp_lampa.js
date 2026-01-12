@@ -5,61 +5,20 @@
         data: {},
         is_running: false,
 
-        params: {
-            user_id: '',
-            force_full: false
-        },
-
         init: function () {
-            Lampa.Noty.show('КП Плагин: Настройки в разделе "Остальное"');
+            // Уведомление о старте
+            Lampa.Noty.show('КП Плагин: Safe Mode (Меню отключено)');
 
-            // Загрузка кэша
+            // Загрузка сохраненных данных
             try {
                 var saved = Lampa.Storage.get('kp_master_cache', '{}');
                 this.data = JSON.parse(saved);
             } catch (e) { this.data = {}; }
 
-            this.params.user_id = Lampa.Storage.get('kp_user_id', '');
-
-            // --- НАСТРОЙКИ ---
-            // 'more' — это внутреннее имя раздела "Остальное"
-            // Это самое безопасное место, оно никогда не вызывает сбоев.
-            
-            Lampa.SettingsApi.addParam({
-                component: 'more', 
-                param: {
-                    name: 'kp_user_id',
-                    type: 'input',
-                    default: '',
-                    placeholder: '3493759'
-                },
-                field: {
-                    name: 'КиноПоиск ID',
-                    description: 'Цифры из ссылки на ваш профиль'
-                },
-                onChange: function (v) {
-                    KP_Master.params.user_id = v;
-                }
-            });
-
-            Lampa.SettingsApi.addParam({
-                component: 'more',
-                param: {
-                    name: 'kp_force_full',
-                    type: 'trigger',
-                    default: false
-                },
-                field: {
-                    name: 'КП: Полная проверка',
-                    description: 'Перекачать все оценки (если меняли старые)'
-                },
-                onChange: function (v) {
-                    KP_Master.params.force_full = v;
-                }
-            });
-
-            // Кнопка в меню и отрисовка
+            // 1. Добавляем кнопку в левое меню
             this.addMenu();
+
+            // 2. Рисуем оценки
             this.addRenderHook();
         },
 
@@ -75,13 +34,41 @@
                 <div class="menu__text">КП: Синхронизация</div>
             </li>`);
 
-            item.on('hover:enter', function () { KP_Master.startScan(); });
+            // При нажатии запускаем проверку
+            item.on('hover:enter', function () { 
+                KP_Master.checkIdAndRun(); 
+            });
 
             if ($('.menu .menu__list').length) {
                 $('.menu .menu__list').eq(0).append(item);
             } else {
                 Lampa.Listener.follow('app', function (e) {
                     if (e.type == 'ready') $('.menu .menu__list').eq(0).append(item);
+                });
+            }
+        },
+
+        // --- ГЛАВНАЯ ЛОГИКА: Спрашиваем ID, если его нет ---
+        checkIdAndRun: function() {
+            var current_id = Lampa.Storage.get('kp_user_id', '');
+
+            if (current_id) {
+                // ID есть, запускаем синхронизацию
+                // Можно добавить вопрос "Сбросить ID?" через долгое нажатие, но пока сделаем просто
+                this.startScan(current_id);
+            } else {
+                // ID нет, вызываем клавиатуру
+                Lampa.Input.edit({
+                    title: 'Введите ID КиноПоиска (только цифры)',
+                    value: '',
+                    free: true,
+                    nosave: true // Мы сохраним сами
+                }, function (new_value) {
+                    if (new_value) {
+                        Lampa.Storage.set('kp_user_id', new_value);
+                        Lampa.Noty.show('ID сохранен!');
+                        KP_Master.startScan(new_value);
+                    }
                 });
             }
         },
@@ -104,18 +91,15 @@
             card.find('.card__view').append(badge);
         },
 
-        startScan: function () {
-            this.params.user_id = Lampa.Storage.get('kp_user_id', '');
-            if (!this.params.user_id) return Lampa.Noty.show('Сначала введите ID в Настройки -> Остальное');
+        startScan: function (user_id) {
             if (this.is_running) return Lampa.Noty.show('Синхронизация уже идет...');
 
             this.is_running = true;
-            this.params.force_full = Lampa.Storage.get('kp_force_full', false);
             Lampa.Noty.show('Поиск оценок...');
 
             var page = 1;
             var new_items = 0;
-            var base_url = 'https://www.kinopoisk.ru/user/' + this.params.user_id + '/votes/list/ord/date/page/';
+            var base_url = 'https://www.kinopoisk.ru/user/' + user_id + '/votes/list/ord/date/page/';
 
             var next = function () {
                 var proxy = 'https://api.allorigins.win/get?url=' + encodeURIComponent(base_url + page + '/');
@@ -140,7 +124,8 @@
                         Lampa.Noty.show('Стр ' + page + ': ' + matches.length + ' (Новых: ' + changes + ')');
                         Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
 
-                        if (changes === 0 && !KP_Master.params.force_full && page > 1) { 
+                        // Сканируем только новые, если не найдено изменений - стоп
+                        if (changes === 0 && page > 1) { 
                             KP_Master.finish('Синхронизировано', new_items); return; 
                         }
                         page++;
