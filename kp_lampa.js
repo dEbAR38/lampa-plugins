@@ -4,23 +4,14 @@
     var KP_Auto = {
         data: {},
         is_running: false,
+        debug_shown: false, // Флаг, чтобы показать debug только 1 раз
 
-        params: {
-            user_id: '',
-            api_key: ''
-        },
+        params: { user_id: '', api_key: '' },
 
         init: function () {
-            // Загружаем базу
-            try { this.data = JSON.parse(Lampa.Storage.get('kp_auto_cache', '{}')); } 
-            catch (e) { this.data = {}; }
-
-            // Загружаем параметры
+            try { this.data = JSON.parse(Lampa.Storage.get('kp_auto_cache', '{}')); } catch (e) { this.data = {}; }
             this.params.user_id = Lampa.Storage.get('kp_user_id', '');
             this.params.api_key = Lampa.Storage.get('kp_api_key', '');
-
-            // МЫ БОЛЬШЕ НЕ ЛЕЗЕМ В НАСТРОЙКИ (чтобы не было зеленого экрана)
-            
             this.addMenu();
             this.addRenderHook();
         },
@@ -28,61 +19,27 @@
         addMenu: function () {
             var item = $(`
             <li class="menu__item selector" data-action="kp_sync">
-                <div class="menu__ico">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="#f1c40f" stroke-width="2" style="width:1.5em;height:1.5em">
-                        <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"></path>
-                    </svg>
-                </div>
-                <div class="menu__text">КП: Обновить (API)</div>
+                <div class="menu__ico"><svg viewBox="0 0 24 24" fill="none" stroke="#f1c40f" stroke-width="2" style="width:1.5em;height:1.5em"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path></svg></div>
+                <div class="menu__text">КП: Обновить (V15)</div>
             </li>`);
-
-            item.on('hover:enter', function () { 
-                KP_Auto.checkParamsAndRun(); 
-            });
-
+            item.on('hover:enter', function () { KP_Auto.checkParamsAndRun(); });
             if ($('.menu .menu__list').length) $('.menu .menu__list').eq(0).append(item);
             else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') $('.menu .menu__list').eq(0).append(item); });
         },
 
-        // --- ЦЕПОЧКА ПРОВЕРОК ---
         checkParamsAndRun: function() {
-            // 1. Проверяем ID
             if (!this.params.user_id) {
-                Lampa.Input.edit({
-                    title: 'Введите ID КиноПоиска (только цифры)',
-                    value: '',
-                    free: true,
-                    nosave: true
-                }, function (new_value) {
-                    if (new_value) {
-                        KP_Auto.params.user_id = new_value;
-                        Lampa.Storage.set('kp_user_id', new_value);
-                        // После ввода ID сразу проверяем Ключ
-                        KP_Auto.checkParamsAndRun();
-                    }
+                Lampa.Input.edit({ title: 'Введите ID (цифры)', value: '', free: true, nosave: true }, function (v) {
+                    if (v) { KP_Auto.params.user_id = v; Lampa.Storage.set('kp_user_id', v); KP_Auto.checkParamsAndRun(); }
                 });
                 return;
             }
-
-            // 2. Проверяем API Key
             if (!this.params.api_key) {
-                Lampa.Input.edit({
-                    title: 'Введите API Key (kinopoiskapiunofficial)',
-                    value: '',
-                    free: true,
-                    nosave: true
-                }, function (new_value) {
-                    if (new_value) {
-                        KP_Auto.params.api_key = new_value;
-                        Lampa.Storage.set('kp_api_key', new_value);
-                        // Всё есть, запускаем!
-                        KP_Auto.startSync();
-                    }
+                Lampa.Input.edit({ title: 'Введите API Key', value: '', free: true, nosave: true }, function (v) {
+                    if (v) { KP_Auto.params.api_key = v; Lampa.Storage.set('kp_api_key', v); KP_Auto.startSync(); }
                 });
                 return;
             }
-
-            // 3. Всё на месте
             this.startSync();
         },
 
@@ -90,9 +47,7 @@
             Lampa.Listener.follow('card', function (e) {
                 if (e.type == 'render') {
                     var id = (e.data.kp_id || e.data.id);
-                    if (id && KP_Auto.data[id]) {
-                        KP_Auto.drawBadge(e.card, KP_Auto.data[id]);
-                    }
+                    if (id && KP_Auto.data[id]) KP_Auto.drawBadge(e.card, KP_Auto.data[id]);
                 }
             });
         },
@@ -107,11 +62,12 @@
         startSync: function () {
             if (this.is_running) return Lampa.Noty.show('Работаю...');
             this.is_running = true;
-            Lampa.Noty.show('API: Скачиваю оценки...');
+            this.debug_shown = false;
+            
+            Lampa.Noty.show('API: Старт...');
 
             var page = 1;
             var total_loaded = 0;
-            // Правильный метод API v1
             var base_url = 'https://kinopoiskapiunofficial.tech/api/v1/kp_users/' + this.params.user_id + '/votes';
 
             var next = function() {
@@ -121,14 +77,25 @@
                     headers: { 'X-API-KEY': KP_Auto.params.api_key },
                     success: function (res) {
                         if (!res.items || res.items.length === 0) {
-                            KP_Auto.finish('Готово', total_loaded);
+                            KP_Auto.finish('Пусто', total_loaded);
                             return;
                         }
 
+                        // --- ОТЛАДКА: ПОКАЗАТЬ ПЕРВЫЙ ЭЛЕМЕНТ ---
+                        if (!KP_Auto.debug_shown) {
+                            var sample = JSON.stringify(res.items[0]).substring(0, 150); // Берем первые 150 символов
+                            Lampa.Noty.show('DEBUG: ' + sample);
+                            console.log('KP DEBUG:', res.items[0]);
+                            KP_Auto.debug_shown = true;
+                        }
+                        // ----------------------------------------
+
                         var changes = 0;
                         res.items.forEach(function(item) {
-                            var filmId = item.kinopoiskId || item.filmId;
-                            var rating = item.rating || item.vote; 
+                            // "ВСЕЯДНЫЙ" ПОИСК (Пытаемся найти ID и Оценку во всех возможных полях)
+                            var filmId = item.kinopoiskId || item.filmId || item.kpId || (item.film ? item.film.filmId : null);
+                            var rating = item.rating || item.vote || item.userRating || item.user_rating || null;
+                            
                             if (filmId && rating && !isNaN(parseFloat(rating))) {
                                 KP_Auto.data[filmId] = parseInt(rating);
                                 changes++;
@@ -136,33 +103,15 @@
                         });
 
                         total_loaded += changes;
-                        Lampa.Noty.show('Стр ' + page + ': +' + changes);
+                        Lampa.Noty.show('Стр ' + page + ': найдено ' + changes);
                         Lampa.Storage.set('kp_auto_cache', JSON.stringify(KP_Auto.data));
 
-                        // Если страница не полная, значит конец
-                        if (res.items.length < 20) {
-                            KP_Auto.finish('Все загружено', total_loaded);
-                            return;
-                        }
-
+                        if (res.items.length < 20) { KP_Auto.finish('Все загружено', total_loaded); return; }
                         page++;
-                        setTimeout(next, 300); // API быстрый, 0.3 сек пауза
+                        setTimeout(next, 300);
                     },
                     error: function(xhr) {
-                        if (xhr.status === 404) {
-                            // Очистим ID чтобы спросить заново
-                            Lampa.Storage.set('kp_user_id', ''); 
-                            KP_Auto.params.user_id = '';
-                            KP_Auto.finish('Ошибка 404: Неверный ID пользователя! Нажмите еще раз.', total_loaded);
-                        } else if (xhr.status === 401 || xhr.status === 402) {
-                            // Очистим ключ
-                            Lampa.Storage.set('kp_api_key', '');
-                            KP_Auto.params.api_key = '';
-                            KP_Auto.finish('Ошибка API Key: Неверный ключ! Нажмите еще раз.', total_loaded);
-                        } else {
-                            Lampa.Noty.show('Пауза (лимит запросов)...');
-                            setTimeout(next, 2000);
-                        }
+                        KP_Auto.finish('Ошибка API: ' + xhr.status, total_loaded);
                     }
                 });
             };
@@ -172,7 +121,7 @@
 
         finish: function(msg, count) {
             this.is_running = false;
-            Lampa.Noty.show(msg + '. Всего: ' + Object.keys(this.data).length);
+            Lampa.Noty.show(msg + '. Итог: ' + Object.keys(this.data).length);
             if (Lampa.Activity.active().activity) Lampa.Activity.active().activity.render();
         }
     };
