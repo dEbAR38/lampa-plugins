@@ -1,17 +1,41 @@
 (function () {
     'use strict';
 
-    var KP_Master = {
+    var KP_API_Plugin = {
         data: {},
         is_running: false,
 
+        params: {
+            user_id: '',
+            api_key: '', // Сюда мы сохраним ключ
+        },
+
         init: function () {
-            Lampa.Noty.show('КП Плагин V11: CorsProxy');
+            // Читаем кэш
+            try { this.data = JSON.parse(Lampa.Storage.get('kp_api_cache', '{}')); } 
+            catch (e) { this.data = {}; }
+
+            // Читаем настройки
+            this.params.user_id = Lampa.Storage.get('kp_user_id', '');
+            this.params.api_key = Lampa.Storage.get('kp_api_key', '');
+
+            // --- ДОБАВЛЯЕМ НАСТРОЙКИ В "ОСТАЛЬНОЕ" ---
             
-            try {
-                var saved = Lampa.Storage.get('kp_master_cache', '{}');
-                this.data = JSON.parse(saved);
-            } catch (e) { this.data = {}; }
+            // 1. Поле для ID
+            Lampa.SettingsApi.addParam({
+                component: 'more',
+                param: { name: 'kp_user_id', type: 'input', default: '', placeholder: '3493759' },
+                field: { name: 'КП: ID Пользователя', description: 'Цифры из ссылки на профиль' },
+                onChange: function (v) { KP_API_Plugin.params.user_id = v; }
+            });
+
+            // 2. Поле для API Key
+            Lampa.SettingsApi.addParam({
+                component: 'more',
+                param: { name: 'kp_api_key', type: 'input', default: '', placeholder: 'xxxx-xxxx-xxxx' },
+                field: { name: 'КП: API Key', description: 'Ключ с kinopoiskapiunofficial.tech' },
+                onChange: function (v) { KP_API_Plugin.params.api_key = v; }
+            });
 
             this.addMenu();
             this.addRenderHook();
@@ -21,50 +45,25 @@
             var item = $(`
             <li class="menu__item selector" data-action="kp_sync">
                 <div class="menu__ico">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="#2ecc71" stroke-width="2" style="width:1.5em;height:1.5em">
-                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
-                        <polyline points="9 11 12 14 22 4"></polyline>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="#f1c40f" stroke-width="2" style="width:1.5em;height:1.5em">
+                        <path d="M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z"></path>
                     </svg>
                 </div>
-                <div class="menu__text">КП: Синхронизация</div>
+                <div class="menu__text">КП: Обновить (API)</div>
             </li>`);
 
-            item.on('hover:enter', function () { KP_Master.checkIdAndRun(); });
+            item.on('hover:enter', function () { KP_API_Plugin.startSync(); });
 
-            if ($('.menu .menu__list').length) {
-                $('.menu .menu__list').eq(0).append(item);
-            } else {
-                Lampa.Listener.follow('app', function (e) {
-                    if (e.type == 'ready') $('.menu .menu__list').eq(0).append(item);
-                });
-            }
-        },
-
-        checkIdAndRun: function() {
-            var current_id = Lampa.Storage.get('kp_user_id', '');
-            if (current_id) {
-                this.startScan(current_id);
-            } else {
-                Lampa.Input.edit({
-                    title: 'Введите ID (только цифры)',
-                    value: '',
-                    free: true,
-                    nosave: true
-                }, function (new_value) {
-                    if (new_value) {
-                        Lampa.Storage.set('kp_user_id', new_value);
-                        KP_Master.startScan(new_value);
-                    }
-                });
-            }
+            if ($('.menu .menu__list').length) $('.menu .menu__list').eq(0).append(item);
+            else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') $('.menu .menu__list').eq(0).append(item); });
         },
 
         addRenderHook: function () {
             Lampa.Listener.follow('card', function (e) {
                 if (e.type == 'render') {
                     var id = (e.data.kp_id || e.data.id);
-                    if (id && KP_Master.data[id]) {
-                        KP_Master.drawBadge(e.card, KP_Master.data[id]);
+                    if (id && KP_API_Plugin.data[id]) {
+                        KP_API_Plugin.drawBadge(e.card, KP_API_Plugin.data[id]);
                     }
                 }
             });
@@ -77,107 +76,69 @@
             card.find('.card__view').append(badge);
         },
 
-        startScan: function (user_id) {
-            if (this.is_running) return Lampa.Noty.show('Процесс уже идет...');
+        // --- ЛОГИКА API ---
+        startSync: function () {
+            // Обновляем параметры перед стартом
+            this.params.user_id = Lampa.Storage.get('kp_user_id', '');
+            this.params.api_key = Lampa.Storage.get('kp_api_key', '');
+
+            if (!this.params.user_id) return Lampa.Noty.show('Введите ID в Настройки -> Остальное');
+            if (!this.params.api_key) return Lampa.Noty.show('Введите API Key в Настройки -> Остальное');
+            if (this.is_running) return Lampa.Noty.show('Синхронизация уже идет...');
 
             this.is_running = true;
-            Lampa.Noty.show('Подключение к новому прокси...');
+            Lampa.Noty.show('API: Запрос данных...');
 
+            // У этого API есть лимит 500 запросов в день.
+            // Но нет метода "Скачать все оценки юзера". 
+            // Придется хитрить: ищем фильмы по ID юзера.
+            // Эндпоинт: /api/v2.2/films/collections?type=USER_MOVIES&page=X
+            // К сожалению, он не отдает оценки самого юзера в явном виде в бесплатной версии,
+            // НО давай попробуем специальный метод парсинга через их базу.
+
+            // ВАРИАНТ B: 
+            // К сожалению, прямой API для оценок закрыт даже у них.
+            // Но мы можем использовать этот плагин как "Облачную базу".
+            // Если этот метод не сработает, то API бессилен.
+            
+            // Тест API
             var page = 1;
             var new_items = 0;
-            // Используем HTTPS ссылку
-            var base_url = 'https://www.kinopoisk.ru/user/' + user_id + '/votes/list/ord/date/page/';
+            var max_pages = 20; // Ограничим чтобы не съесть весь лимит
             
-            var save_counter = 0;
-
-            var next = function () {
-                // НОВЫЙ ПРОКСИ: corsproxy.io
-                var proxy = 'https://corsproxy.io/?' + encodeURIComponent(base_url + page + '/');
+            var next = function() {
+                // Пытаемся взять коллекцию "Любимые фильмы" или просто список
+                // Внимание: UNOFFICIAL API меняет методы часто.
+                // Сейчас пробуем метод получения топа
                 
                 $.ajax({
-                    url: proxy, 
+                    url: 'https://kinopoiskapiunofficial.tech/api/v2.2/films/collections?type=TOP_POPULAR_ALL&page=' + page, // ТЕСТОВЫЙ ЗАПРОС
                     type: 'GET',
-                    timeout: 20000, 
+                    headers: { 'X-API-KEY': KP_API_Plugin.params.api_key },
                     success: function (res) {
-                        // Проверка на БЛОКИРОВКУ
-                        if (res.indexOf('SmartCaptcha') > -1 || res.indexOf('робот') > -1) {
-                            KP_Master.finish('ОШИБКА: Яндекс требует Капчу. Попробуйте позже.', new_items);
-                            return;
-                        }
-
-                        // Проверка на пустоту
-                        if (res.length < 500) {
-                             KP_Master.finish('ОШИБКА: Пустой ответ от сервера.', new_items);
-                             return;
-                        }
-
-                        // Поиск фильмов (Улучшенный regex)
-                        // Ищет /film/ID/ ... и любое число 1-10 после него
-                        var regex = /film\/(\d+)\/.*?(\d{1,2})<\/div>/g; 
-                        // Если старый дизайн не сработал, пробуем новый (там оценка в span или div с классом)
-                        var matches = [...res.matchAll(/film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g)];
-
-                        if (matches.length === 0) { 
-                            // Если всё равно 0, пробуем супер-грубый поиск (на случай смены верстки)
-                            // Просто ищем ID, а оценку будем искать "на глаз"
-                            if(res.indexOf('film/' + user_id) === -1) {
-                                KP_Master.finish('Готово (Список закончился)', new_items); 
-                                return; 
-                            }
-                        }
-
-                        var changes = 0;
-                        matches.forEach(function (m) {
-                            var id = m[1]; var rating = parseInt(m[2]);
-                            // Фильтр мусора (иногда парсится год 2024 как оценка)
-                            if (rating > 0 && rating <= 10) {
-                                if (KP_Master.data[id] !== rating) {
-                                    KP_Master.data[id] = rating; changes++; new_items++;
-                                }
-                            }
-                        });
-
-                        Lampa.Noty.show('Стр ' + page + ': найдено ' + matches.length);
+                        // Если этот запрос прошел, значит ключ верный.
+                        // Но проблема: API не отдает ЛИЧНЫЕ оценки.
                         
-                        // Сохраняем каждые 3 страницы
-                        save_counter++;
-                        if (save_counter % 3 === 0) {
-                            Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
-                        }
-
-                        if (changes === 0 && page > 1) { 
-                            KP_Master.finish('Синхронизировано', new_items); return; 
-                        }
+                        // Я вынужден тебя огорчить: 
+                        // Ни один публичный API сейчас не отдает личные оценки пользователя
+                        // без авторизации через OAuth Яндекса (что на телеке сделать нереально сложно).
                         
-                        page++;
-                        if (page > 150) { KP_Master.finish('Лимит страниц', new_items); return; }
-                        
-                        setTimeout(next, 3500); 
+                        KP_API_Plugin.is_running = false;
+                        Lampa.Noty.show('Тест API успешен, но доступ к оценкам закрыт Яндексом.');
                     },
-                    error: function (xhr, status) { 
-                        Lampa.Noty.show('Ошибка сети: ' + status + '. Жду...');
-                        setTimeout(next, 6000); 
+                    error: function(e) {
+                        KP_API_Plugin.is_running = false;
+                        Lampa.Noty.show('Ошибка API. Проверьте ключ.');
                     }
                 });
             };
+            
+            // Запускаем
             next();
-        },
-
-        finish: function (msg, count) {
-            this.is_running = false;
-            Lampa.Storage.set('kp_master_cache', JSON.stringify(this.data));
-            Lampa.Noty.show(msg + '. Обновлено: ' + (count || 0));
-            if (Lampa.Activity.active().activity) Lampa.Activity.active().activity.render();
         }
     };
 
-    function startPlugin() {
-        if (window.kp_plugin_loaded) return;
-        window.kp_plugin_loaded = true;
-        KP_Master.init();
-    }
-
-    if (window.appready) startPlugin();
-    else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') startPlugin(); });
+    if (window.appready) KP_API_Plugin.init();
+    else Lampa.Listener.follow('app', function (e) { if (e.type == 'ready') KP_API_Plugin.init(); });
 
 })();
