@@ -6,19 +6,14 @@
         is_running: false,
 
         init: function () {
-            // Уведомление о старте
-            Lampa.Noty.show('КП Плагин: Safe Mode (Меню отключено)');
-
-            // Загрузка сохраненных данных
+            Lampa.Noty.show('КП Плагин: Легкая версия (V10)');
+            
             try {
                 var saved = Lampa.Storage.get('kp_master_cache', '{}');
                 this.data = JSON.parse(saved);
             } catch (e) { this.data = {}; }
 
-            // 1. Добавляем кнопку в левое меню
             this.addMenu();
-
-            // 2. Рисуем оценки
             this.addRenderHook();
         },
 
@@ -34,10 +29,7 @@
                 <div class="menu__text">КП: Синхронизация</div>
             </li>`);
 
-            // При нажатии запускаем проверку
-            item.on('hover:enter', function () { 
-                KP_Master.checkIdAndRun(); 
-            });
+            item.on('hover:enter', function () { KP_Master.checkIdAndRun(); });
 
             if ($('.menu .menu__list').length) {
                 $('.menu .menu__list').eq(0).append(item);
@@ -48,25 +40,19 @@
             }
         },
 
-        // --- ГЛАВНАЯ ЛОГИКА: Спрашиваем ID, если его нет ---
         checkIdAndRun: function() {
             var current_id = Lampa.Storage.get('kp_user_id', '');
-
             if (current_id) {
-                // ID есть, запускаем синхронизацию
-                // Можно добавить вопрос "Сбросить ID?" через долгое нажатие, но пока сделаем просто
                 this.startScan(current_id);
             } else {
-                // ID нет, вызываем клавиатуру
                 Lampa.Input.edit({
-                    title: 'Введите ID КиноПоиска (только цифры)',
+                    title: 'Введите ID КиноПоиска',
                     value: '',
                     free: true,
-                    nosave: true // Мы сохраним сами
+                    nosave: true
                 }, function (new_value) {
                     if (new_value) {
                         Lampa.Storage.set('kp_user_id', new_value);
-                        Lampa.Noty.show('ID сохранен!');
                         KP_Master.startScan(new_value);
                     }
                 });
@@ -92,26 +78,42 @@
         },
 
         startScan: function (user_id) {
-            if (this.is_running) return Lampa.Noty.show('Синхронизация уже идет...');
+            if (this.is_running) return Lampa.Noty.show('Уже работает...');
 
             this.is_running = true;
-            Lampa.Noty.show('Поиск оценок...');
+            Lampa.Noty.show('Сканирование начато. Не нажимайте ничего...');
 
             var page = 1;
             var new_items = 0;
             var base_url = 'https://www.kinopoisk.ru/user/' + user_id + '/votes/list/ord/date/page/';
+            
+            // Счетчик для редкого сохранения
+            var save_counter = 0;
 
             var next = function () {
                 var proxy = 'https://api.allorigins.win/get?url=' + encodeURIComponent(base_url + page + '/');
+                
                 $.ajax({
-                    url: proxy, dataType: 'json', timeout: 10000,
+                    url: proxy, 
+                    dataType: 'json', 
+                    timeout: 15000, // Увеличили таймаут ожидания
                     success: function (res) {
-                        if (!res.contents) { KP_Master.finish('Ошибка доступа (Proxy)'); return; }
+                        if (!res.contents) { 
+                            KP_Master.finish('Ошибка сети (прокси)', new_items); 
+                            return; 
+                        }
                         
-                        var regex = /film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g;
-                        var matches = [...res.contents.matchAll(regex)];
+                        var text = res.contents;
+                        // Очищаем res сразу, чтобы освободить память ТВ
+                        res = null; 
 
-                        if (matches.length === 0) { KP_Master.finish('Готово', new_items); return; }
+                        var regex = /film\/(\d+)\/[\s\S]*?(?:vote|rating|date|kp_rating)[^>]*?>\s*(\d{1,2})\s*</g;
+                        var matches = [...text.matchAll(regex)];
+
+                        if (matches.length === 0) { 
+                            KP_Master.finish('Готово (Все страницы)', new_items); 
+                            return; 
+                        }
 
                         var changes = 0;
                         matches.forEach(function (m) {
@@ -121,18 +123,28 @@
                             }
                         });
 
-                        Lampa.Noty.show('Стр ' + page + ': ' + matches.length + ' (Новых: ' + changes + ')');
-                        Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
+                        Lampa.Noty.show('Стр ' + page + ': найдено ' + matches.length);
+                        
+                        // ОПТИМИЗАЦИЯ: Сохраняем только каждую 5-ю страницу
+                        save_counter++;
+                        if (save_counter % 5 === 0) {
+                            Lampa.Storage.set('kp_master_cache', JSON.stringify(KP_Master.data));
+                        }
 
-                        // Сканируем только новые, если не найдено изменений - стоп
                         if (changes === 0 && page > 1) { 
                             KP_Master.finish('Синхронизировано', new_items); return; 
                         }
+                        
                         page++;
                         if (page > 150) { KP_Master.finish('Лимит страниц', new_items); return; }
-                        setTimeout(next, 2500);
+                        
+                        // ОПТИМИЗАЦИЯ: Ждем 4 секунды вместо 2.5
+                        setTimeout(next, 4000); 
                     },
-                    error: function () { setTimeout(next, 5000); }
+                    error: function () { 
+                        Lampa.Noty.show('Сбой сети. Жду 10 сек...');
+                        setTimeout(next, 10000); 
+                    }
                 });
             };
             next();
@@ -140,6 +152,9 @@
 
         finish: function (msg, count) {
             this.is_running = false;
+            // Финальное сохранение обязательно
+            Lampa.Storage.set('kp_master_cache', JSON.stringify(this.data));
+            
             Lampa.Noty.show(msg + '. Обновлено: ' + (count || 0));
             if (Lampa.Activity.active().activity) Lampa.Activity.active().activity.render();
         }
